@@ -145,7 +145,22 @@ function export_lovelace {
 
 function export_esphome {
     bashio::log.info 'Get ESPHome configs'
+    # Honor user-provided `exclude:` entries that target files under esphome/.
+    # Strip the `esphome/` prefix (rsync source is /config/esphome, so
+    # excludes are relative to that root). These must come BEFORE the
+    # `--include='*.yaml'` rule so rsync's first-match wins in favour of
+    # the exclude — otherwise a yaml file matching *.yaml is included before
+    # the exclude has a chance to skip it.
+    esphome_exclude_args=""
+    while IFS= read -r ex; do
+        [ -n "$ex" ] || continue
+        case "$ex" in
+            esphome/*) esphome_exclude_args+="--exclude=${ex#esphome/} " ;;
+        esac
+    done <<<"$(bashio::config 'exclude')"
+    # shellcheck disable=SC2086
     rsync -archive --compress --delete --checksum --prune-empty-dirs -q \
+         $esphome_exclude_args \
          --exclude='.esphome*' --include='*/' --include='.gitignore' --include='*.yaml' --include='*.disabled' --exclude='secrets.yaml' --exclude='*' \
         /config/esphome ${local_repository}
     [ -f /config/esphome/secrets.yaml ] && sed 's/:.*$/: ""/g' /config/esphome/secrets.yaml > ${local_repository}/esphome/secrets.yaml
