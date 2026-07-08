@@ -175,7 +175,20 @@ function export_addons {
 
 function export_node-red {
     bashio::log.info 'Get Node-RED flows'
+    # Forward user excludes matching node-red/ (strip prefix). The rsync
+    # includes only flows.json + settings.js by default, but a user might
+    # still want to skip flows.json — e.g. a private flow set that shouldn't
+    # leave HA.
+    node_red_exclude_args=""
+    while IFS= read -r ex; do
+        [ -n "$ex" ] || continue
+        case "$ex" in
+            node-red/*) node_red_exclude_args+="--exclude=${ex#node-red/} " ;;
+        esac
+    done <<<"$(bashio::config 'exclude')"
+    # shellcheck disable=SC2086
     rsync -archive --compress --delete --checksum --prune-empty-dirs -q \
+          $node_red_exclude_args \
           --exclude='flows_cred.json' --exclude='*.backup' --include='flows.json' --include='settings.js' --exclude='*' \
         /config/node-red/ ${local_repository}/node-red
     chmod 644 -R ${local_repository}/node-red
