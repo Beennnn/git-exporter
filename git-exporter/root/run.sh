@@ -65,6 +65,23 @@ function check_secrets {
     # Allow !secret lines
     git secrets --add -a '!secret'
 
+    # Allow common placeholder tokens so post-scrub repos, templates, and
+    # example configs pass the check. Without these, any `password: FOO`
+    # line where FOO is a placeholder (not a real secret) trips the
+    # built-in `password:\w+` pattern and blocks the push.
+    #   REDACTED_*        — output of git-filter-repo secret scrubs
+    #   CHANGE_ME / CHANGEME — common template convention
+    #   YOUR_*_HERE       — README / example config convention
+    #   PLACEHOLDER_*     — same
+    #   <TOKEN>           — Django-style angle-bracket placeholder
+    #   {{ token }}       — Jinja-style
+    git secrets --add -a 'REDACTED_[A-Z0-9_]+'
+    git secrets --add -a 'CHANGE_?ME(_[A-Z0-9_]+)?'
+    git secrets --add -a 'YOUR_[A-Z0-9_]+_HERE'
+    git secrets --add -a 'PLACEHOLDER_[A-Z0-9_]+'
+    git secrets --add -a '<[A-Z][A-Z0-9_]*>'
+    git secrets --add -a '\{\{\s*[a-zA-Z_][a-zA-Z0-9_.]*\s*\}\}'
+
     # Set prohibited patterns
     git secrets --add "password:\s?[\'\"]?\w+[\'\"]?\n?"
     git secrets --add "token:\s?[\'\"]?\w+[\'\"]?\n?"
