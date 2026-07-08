@@ -169,7 +169,18 @@ function export_addons {
       | jq '. | map(select(.source != null and .source != "core" and .source != "local")) | map({(.name): {source,maintainer,slug}}) | add' > /tmp/tmp.json
     /utils/jsonToYaml.py /tmp/tmp.json
     mv /tmp/tmp.yaml "/tmp/addons/repositories.yaml"
-    rsync -archive --compress --delete --checksum --prune-empty-dirs -q /tmp/addons/ ${local_repository}/addons
+    # Forward user excludes matching addons/ (strip prefix). One `.yaml` file
+    # is written per installed addon (${slug}.yaml), so users can skip a
+    # given addon's exported options by listing `addons/${slug}.yaml`.
+    addons_exclude_args=""
+    while IFS= read -r ex; do
+        [ -n "$ex" ] || continue
+        case "$ex" in
+            addons/*) addons_exclude_args+="--exclude=${ex#addons/} " ;;
+        esac
+    done <<<"$(bashio::config 'exclude')"
+    # shellcheck disable=SC2086
+    rsync -archive --compress --delete --checksum --prune-empty-dirs -q $addons_exclude_args /tmp/addons/ ${local_repository}/addons
     chmod 644 -R ${local_repository}/addons
 }
 
