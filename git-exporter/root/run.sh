@@ -77,7 +77,15 @@ function check_secrets {
     git secrets --add "credential_secret:\s?[\'\"]?\w+[\'\"]?\n?"
 
     if [ "$(bashio::config 'check.check_for_secrets')" == 'true' ]; then
-        git secrets --add-provider -- sed '/^$/d;/^#.*/d;/^&/d;s/^.*://g;s/\s//g' /config/secrets.yaml
+        # Extract leaf values from /config/secrets.yaml and add them as
+        # git-secrets patterns. See utils/extract_secret_values.py for the
+        # filtering rules (regex-escape, skip booleans/numbers/short values).
+        # The previous inline `sed` version was buggy in three ways:
+        #   1. `s/\s//g` deleted the letter 's' from every value.
+        #   2. Values were unescaped, so `.` matched any char.
+        #   3. No length/type filter → `port: 8123` matched the default HA port
+        #      everywhere and `true`/`false` matched every boolean.
+        git secrets --add-provider -- /utils/extract_secret_values.py /config/secrets.yaml
     fi
 
     if [ "$(bashio::config 'check.check_for_ips')" == 'true' ]; then
