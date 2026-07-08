@@ -1,3 +1,5 @@
+> **🔱 Fork notice** — fork of [Poeschl-HomeAssistant-Addons/git-exporter](https://github.com/Poeschl-HomeAssistant-Addons/git-exporter) used as a **local-build variant for my own Home Assistant**: it carries a `check_secrets` fix (upstream #6) and a Docker-tag-safe version scheme. Use the upstream add-on unless you need those patches.
+
 # Home Assistant Git Exporter
 
 Export all of your Home Assistant configuration to a git repository of your choice.
