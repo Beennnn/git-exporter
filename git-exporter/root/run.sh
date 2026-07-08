@@ -139,7 +139,19 @@ function export_lovelace {
     mkdir -p '/tmp/lovelace'
     find /config/.storage -name "lovelace*" -printf '%f\n' | xargs -I % cp /config/.storage/% /tmp/lovelace/%.json
     /utils/jsonToYaml.py '/tmp/lovelace/' 'data'
-    rsync -archive --compress --delete --checksum --prune-empty-dirs -q --include='*.yaml' --exclude='*' /tmp/lovelace/ "${local_repository}/lovelace"
+    # Honor user-provided `exclude:` entries that target files under lovelace/.
+    # Rsync source is /tmp/lovelace (files named e.g. lovelace.dashboard_x.yaml)
+    # so we strip the `lovelace/` prefix. Excludes MUST come before the
+    # `--include='*.yaml'` rule — rsync uses first-match-wins.
+    lovelace_exclude_args=""
+    while IFS= read -r ex; do
+        [ -n "$ex" ] || continue
+        case "$ex" in
+            lovelace/*) lovelace_exclude_args+="--exclude=${ex#lovelace/} " ;;
+        esac
+    done <<<"$(bashio::config 'exclude')"
+    # shellcheck disable=SC2086
+    rsync -archive --compress --delete --checksum --prune-empty-dirs -q $lovelace_exclude_args --include='*.yaml' --exclude='*' /tmp/lovelace/ "${local_repository}/lovelace"
     chmod 644 -R "${local_repository}/lovelace"
 }
 
