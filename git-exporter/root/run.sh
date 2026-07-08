@@ -113,9 +113,12 @@ function check_secrets {
     fi
 
     bashio::log.info 'Checking for secrets'
-    # shellcheck disable=SC2046
-    git secrets --scan $(find $local_repository -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.disabled') \
-    || (bashio::log.error 'Found secrets in files!!! Fix them to be able to commit! See https://www.home-assistant.io/docs/configuration/secrets/ for more information!' && exit 1)
+    # Use -print0 | xargs -0 so filenames with spaces (e.g. HACS theme
+    # `Liquid Glass.yaml`) are passed as single arguments rather than
+    # word-split by the shell.
+    find "$local_repository" \( -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.disabled' \) -print0 \
+        | xargs -0 --no-run-if-empty git secrets --scan \
+        || (bashio::log.error 'Found secrets in files!!! Fix them to be able to commit! See https://www.home-assistant.io/docs/configuration/secrets/ for more information!' && exit 1)
 }
 
 function export_ha_config {
