@@ -17,6 +17,7 @@ checks:
   enabled: true
   check_for_secrets: true
   check_for_ips: true
+  mode: error
 exclude:
   - '*.db'
   - '*.log'
@@ -85,15 +86,43 @@ Secure your credentials with [node-red-contrib-credentials](https://flows.nodere
 
 ### `checks.enabled`
 
-Enable / Disable the checks in the exported files.
+Master switch for the secret / IP scan. When `true`, the addon scans the
+exported yaml/json/disabled files with `git-secrets` before committing.
+
+Nine built-in prohibited patterns always run when `checks.enabled: true`,
+regardless of the sub-toggles below. They flag any line matching one of:
+`password:`, `token:`, `client_id:`, `api_key:`, `chat_id:`,
+`allowed_chat_ids:`, `latitude:`, `longitude:`, `credential_secret:`.
+
+Lines that include `!secret` (HA convention) are automatically allowed.
 
 ### `checks.check_for_secrets`
 
-Add your secret values to the check.
+Adds the values from `/config/secrets.yaml` as additional prohibited
+patterns, so any yaml file that hardcodes one of your real secret
+values gets flagged. The sub-toggle name is a bit narrower than it
+sounds: even with `checks.check_for_secrets: false`, the 9 built-in
+`password:`/`token:`/... patterns above still run. Setting this to
+`true` only ADDS more patterns from secrets.yaml — it does not by
+itself enable or disable the whole secret scan.
 
 ### `checks.check_for_ips`
 
 Add pattern for ip and mac addresses to the search.
+
+### `checks.mode` (Optional, default: `error`)
+
+Controls how the addon reacts when the scan finds a match.
+
+* `error` (default) — log the matches and abort the run. Nothing gets
+  committed or pushed. This is the existing behaviour.
+* `warn` — log the matches with a warning and proceed with the commit
+  and push anyway. Useful when you know the flagged content is safe
+  (private repo, well-scoped audience, deferred cleanup) and you don't
+  want the sync blocked while you migrate secrets to `!secret` refs.
+
+Only affects the check step. If `checks.enabled: false`, this option
+is ignored.
 
 
 ### `exclude`

@@ -34,6 +34,7 @@ options:
     enabled: true
     check_for_secrets: true
     check_for_ips: true
+    mode: error
   exclude:
     - '*.db'
     - '*.log*'
@@ -68,6 +69,7 @@ schema:
     enabled: bool
     check_for_secrets: bool
     check_for_ips: bool
+    mode: list(warn|error)?
   exclude:
     - str
   secrets:

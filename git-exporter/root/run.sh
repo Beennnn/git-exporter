@@ -113,9 +113,17 @@ function check_secrets {
     fi
 
     bashio::log.info 'Checking for secrets'
+    check_mode="$(bashio::config 'check.mode')"
+    check_mode="${check_mode:-error}"
     # shellcheck disable=SC2046
-    git secrets --scan $(find $local_repository -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.disabled') \
-    || (bashio::log.error 'Found secrets in files!!! Fix them to be able to commit! See https://www.home-assistant.io/docs/configuration/secrets/ for more information!' && exit 1)
+    if ! git secrets --scan $(find $local_repository -name '*.yaml' -o -name '*.yml' -o -name '*.json' -o -name '*.disabled'); then
+        if [ "$check_mode" = 'warn' ]; then
+            bashio::log.warning 'Found potential secrets in files, but check.mode=warn — proceeding with commit. See https://www.home-assistant.io/docs/configuration/secrets/ for how to move real credentials to secrets.yaml.'
+        else
+            bashio::log.error 'Found secrets in files!!! Fix them to be able to commit! See https://www.home-assistant.io/docs/configuration/secrets/ for more information!'
+            exit 1
+        fi
+    fi
 }
 
 function export_ha_config {
