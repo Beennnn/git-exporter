@@ -24,6 +24,10 @@ options:
     password: ''
     pull_before_push: true
     commit_message: Home Assistant Git Exporter
+    commit_message_prompt: ''
+    commit_message_api_key: ''
+    commit_message_model: claude-haiku-4-5-20251001
+    commit_message_timeout: 10
     branch_name: main
   export:
     lovelace: true
@@ -57,6 +61,10 @@ schema:
     password: password
     pull_before_push: bool
     commit_message: str
+    commit_message_prompt: str?
+    commit_message_api_key: password?
+    commit_message_model: str?
+    commit_message_timeout: int?
     branch_name: str
     ssl_verification: bool?
   export:
