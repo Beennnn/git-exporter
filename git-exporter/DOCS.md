@@ -7,6 +7,10 @@ repository:
   password: pass
   pull_before_push: true
   commit_message: 'Home Assistant Git Exporter'
+  commit_message_prompt: ''
+  commit_message_api_key: ''
+  commit_message_model: 'claude-haiku-4-5-20251001'
+  commit_message_timeout: 10
   branch_name: 'main'
 export:
   lovelace: true
@@ -54,7 +58,32 @@ Should the repository be pulled first and commit the new state on top?
 
 ### `repository.commit_message`
 
-The commit message for the next commit.
+The commit message for the next commit. Also used as the fallback whenever AI
+message generation is disabled or fails (see below).
+
+### `repository.commit_message_prompt` (Optional)
+
+Prompt sent to the LLM when AI commit messages are enabled. Leave empty to use a
+sensible default (one-line French, conventional-commits style, ≤ 72 chars). The
+staged diff is appended to this prompt automatically.
+
+### `repository.commit_message_api_key` (Optional)
+
+Anthropic API key. **This is the on/off switch**: when set (e.g. via
+`!secret anthropic_api_key`), each commit message is generated from the actual
+diff by the model. When empty (default), the static `commit_message` is used —
+no API call is made. Any API failure or timeout silently falls back to the
+static message, so a commit is never blocked.
+
+### `repository.commit_message_model` (Optional)
+
+Model id used for message generation. Default: `claude-haiku-4-5-20251001`
+(cheapest; ~$1.80/month at a 15-minute export cadence).
+
+### `repository.commit_message_timeout` (Optional)
+
+Seconds to wait for the API before falling back to the static message.
+Default: `10`.
 
 ### `repository.branch_name`
 

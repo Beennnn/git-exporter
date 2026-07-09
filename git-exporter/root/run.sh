@@ -181,6 +181,58 @@ function export_node-red {
     chmod 644 -R ${local_repository}/node-red
 }
 
+# Generate a one-line commit message from the staged diff via the Anthropic API.
+# Opt-in: only invoked when repository.commit_message_api_key is set. Prints the
+# message to stdout, or nothing on ANY failure so the caller keeps the static
+# repository.commit_message fallback. Never blocks or delays a commit beyond the
+# configured timeout. See docs/design/ai-commit-messages.md (consumer config repo).
+function generate_ai_commit_message {
+    local api_key="$1"
+    local prompt model timeout_s diff payload response ai_msg
+
+    prompt="$(bashio::config 'repository.commit_message_prompt')"
+    model="$(bashio::config 'repository.commit_message_model')"
+    timeout_s="$(bashio::config 'repository.commit_message_timeout')"
+
+    # Sane defaults when the options are left empty (bashio returns 'null' for unset optionals).
+    if [ -z "$prompt" ] || [ "$prompt" == 'null' ]; then
+        prompt="Rédige un message de commit Français d'une ligne (max 72 caractères, style conventional commits). Résume le diff ci-dessous. Pas d'introduction, juste la ligne."
+    fi
+    if [ -z "$model" ] || [ "$model" == 'null' ]; then
+        model='claude-haiku-4-5-20251001'
+    fi
+    if [ -z "$timeout_s" ] || [ "$timeout_s" == 'null' ]; then
+        timeout_s=10
+    fi
+
+    # Bound the diff: keeps the prompt cheap AND caps the prompt-injection surface
+    # from arbitrary config-file content (design §"Failure mode considerations").
+    diff="$( { git diff --cached --stat | head -50; echo; git diff --cached | head -300; } 2>/dev/null )" || true
+    if [ -z "$diff" ]; then
+        return 0
+    fi
+
+    payload="$(jq -n --arg model "$model" --arg prompt "$prompt" --arg diff "$diff" '{
+        model: $model,
+        max_tokens: 200,
+        messages: [{role: "user", content: ($prompt + "\n\nDiff:\n" + $diff)}]
+    }')"
+
+    # -m timeout → falls back to static on any network hiccup; never hangs a commit.
+    response="$(curl -sS -m "$timeout_s" -X POST https://api.anthropic.com/v1/messages \
+        -H "x-api-key: ${api_key}" \
+        -H 'anthropic-version: 2023-06-01' \
+        -H 'content-type: application/json' \
+        -d "$payload" 2>/dev/null || true)"
+
+    # '// empty' → empty string on malformed JSON or an API error object.
+    ai_msg="$(printf '%s' "$response" | jq -r '.content[0].text // empty' 2>/dev/null || true)"
+    # Defensive: keep only the first non-blank line even if the model returns prose.
+    ai_msg="$(printf '%s\n' "$ai_msg" | sed '/^[[:space:]]*$/d' | head -1)"
+
+    printf '%s' "$ai_msg"
+}
+
 bashio::log.info 'Start git export'
 
 setup_git
@@ -213,7 +265,25 @@ if [ "$(bashio::config 'dry_run')" == 'true' ]; then
 else
     bashio::log.info 'Commit changes and push to remote'
     git add .
-    git commit -m "$(bashio::config 'repository.commit_message')"
+
+    commit_message="$(bashio::config 'repository.commit_message')"
+
+    # Optionally replace the static message with an AI-generated one describing the
+    # actual diff. Opt-in via repository.commit_message_api_key; any failure silently
+    # keeps the static fallback above (see generate_ai_commit_message).
+    ai_api_key="$(bashio::config 'repository.commit_message_api_key')"
+    if [ -n "$ai_api_key" ] && [ "$ai_api_key" != 'null' ] && ! git diff --cached --quiet; then
+        bashio::log.info 'Generating AI commit message from staged diff'
+        ai_commit_message="$(generate_ai_commit_message "$ai_api_key")"
+        if [ -n "$ai_commit_message" ]; then
+            commit_message="$ai_commit_message"
+            bashio::log.info "AI commit message: ${commit_message}"
+        else
+            bashio::log.warning 'AI commit message unavailable — using static fallback'
+        fi
+    fi
+
+    git commit -m "$commit_message"
 
     if [ ! "$pull_before_push" == 'true' ]; then
         git push --set-upstream origin "$branch" -f
