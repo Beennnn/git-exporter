@@ -30,8 +30,9 @@ function setup_git {
         git config --global http.sslVerify false
     fi
 
+    fullurl="https://${username}:${password}@${repository##*https://}"
+
     if [ ! -d .git ]; then
-        fullurl="https://${username}:${password}@${repository##*https://}"
         if [ "$pull_before_push" == 'true' ]; then
             bashio::log.info 'Clone existing repository'
             git clone "$fullurl" $local_repository
@@ -43,6 +44,17 @@ function setup_git {
         fi
         git config user.name "${username}"
         git config user.email "${commiter_mail:-git.exporter@home-assistant}"
+    fi
+
+    # Always refresh the origin URL from the current add-on options so a
+    # rotated credential (e.g. a re-generated GitHub PAT) is picked up on
+    # every run. Without this the credential is embedded only at the first
+    # clone into the persistent /data/repository and never updated, so
+    # rotating the token silently breaks fetch/push until /data is wiped.
+    if git remote get-url origin >/dev/null 2>&1; then
+        git remote set-url origin "$fullurl"
+    else
+        git remote add origin "$fullurl"
     fi
 
     #Reset secrets if existing
