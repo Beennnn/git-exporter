@@ -66,6 +66,13 @@ function setup_git {
     if [ "$pull_before_push" == 'true' ]; then
         bashio::log.info 'Pull latest'
         git fetch
+        # Ensure the local branch actually IS $branch. Without this, a persistent
+        # /data clone stays on whatever branch it was first cloned with, so
+        # changing repository.branch_name in the options never takes effect (the
+        # push at the end targets the old branch). checkout -B re-points the local
+        # branch to origin/$branch and switches to it, so branch_name changes work
+        # without clearing /data.
+        git checkout -B "$branch" "origin/$branch"
         git reset --hard "origin/$branch"
     fi
 
@@ -309,7 +316,7 @@ else
     if [ ! "$pull_before_push" == 'true' ]; then
         git push --set-upstream origin "$branch" -f
     else
-        git push origin
+        git push origin HEAD:"$branch"
     fi
 fi
 
