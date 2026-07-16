@@ -89,6 +89,25 @@ Default: `10`.
 
 The working branch for the repository.
 
+### `repository.skip_when_deploy_pending` (Optional, default: false)
+
+Removes the race between this exporter (HA → git) and a companion git-deployer
+(git → HA). When enabled, before snapshotting the exporter compares the remote
+branch head to a "last deployed SHA" published by the deployer (see
+`deployed_sha_entity`). If the remote is **ahead** of the deployed SHA — a merged
+change hasn't reached `/config` yet — the exporter **skips this cycle** instead of
+pushing the pre-deploy `/config` back and reverting it. Fail-safe: if the marker
+is unreadable, absent, or the remote head is unknown, the exporter does **not**
+skip (a live change is never silently dropped). Requires the deployer to publish
+the marker reliably on every deploy; keep it `false` until that is in place. See
+the consumer repo's `docs/design/deploy-snapshot-race.md`.
+
+### `repository.deployed_sha_entity` (Optional)
+
+The Home Assistant entity holding the last-deployed commit SHA, read via the
+Supervisor's Core API. Default: `input_text.ha_deployed_sha`. Only used when
+`skip_when_deploy_pending` is `true`.
+
 ### `repository.ssl_verification` (Optional, default: true)
 
 Use this to disable the ssl verification. Can be used for self-signed certificates. __Use this only when you know what you are doing__

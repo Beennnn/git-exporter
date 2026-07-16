@@ -261,9 +261,58 @@ function generate_ai_commit_message {
     printf '%s' "$ai_msg"
 }
 
+# Skip the snapshot when a deploy is pending — supprime la course exporter/deployer.
+# git-deployer publie le SHA appliqué à /config (dans une entité HA input_text) après
+# CHAQUE déploiement réussi. Si origin/$branch est EN AVANCE sur ce SHA, c'est qu'une
+# PR mergée n'a pas encore atteint /config : snapshoter maintenant re-pousserait le
+# /config d'avant-déploiement et annulerait le changement. On saute alors ce cycle ;
+# le deployer rattrape, et le cycle suivant snapshote normalement.
+# Opt-in via repository.skip_when_deploy_pending. FAIL-SAFE : au moindre doute (garde
+# OFF, HEAD distant inconnu, marqueur absent/illisible) on NE saute PAS — Workflow B
+# n'est jamais cassé silencieusement. Détail : docs/design/deploy-snapshot-race.md
+# (repo consommateur ha-vallesvilles-family).
+function deploy_is_pending {
+    local enabled entity head deployed
+    enabled="$(bashio::config 'repository.skip_when_deploy_pending')"
+    [ "$enabled" == 'true' ] || return 1
+
+    head="$(git -C "$local_repository" rev-parse --verify --quiet "origin/${branch}" 2>/dev/null || true)"
+    if [ -z "$head" ]; then
+        bashio::log.warning 'Anti-course: HEAD distant inconnu — snapshot autorisé (fail-safe)'
+        return 1
+    fi
+
+    entity="$(bashio::config 'repository.deployed_sha_entity')"
+    if [ -z "$entity" ] || [ "$entity" == 'null' ]; then
+        entity='input_text.ha_deployed_sha'
+    fi
+
+    # shellcheck disable=SC2154  # SUPERVISOR_TOKEN is injected by the Supervisor at runtime
+    deployed="$(curl -sSL -m 10 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        "http://supervisor/core/api/states/${entity}" 2>/dev/null \
+        | jq -r '.state // empty' 2>/dev/null || true)"
+
+    case "$deployed" in
+        ''|null|unknown|unavailable)
+            bashio::log.warning "Anti-course: ${entity} illisible — snapshot autorisé (fail-safe)"
+            return 1 ;;
+    esac
+
+    if [ "$head" != "$deployed" ]; then
+        bashio::log.info "Anti-course: déploiement en attente (${deployed:0:8} → ${head:0:8}) — snapshot sauté"
+        return 0
+    fi
+    return 1
+}
+
 bashio::log.info 'Start git export'
 
 setup_git
+
+if deploy_is_pending; then
+    bashio::log.info 'Exporter finished (snapshot sauté: déploiement en attente)'
+    exit 0
+fi
 
 export_ha_config
 
