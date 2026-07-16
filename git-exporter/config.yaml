@@ -1,7 +1,7 @@
 name: Home Assistant Git Exporter (patched)
-version: "1.17.1-beennnn.4"
+version: "1.17.1-beennnn.5"
 slug: git-exporter
-description: Export all of your HA config to a git repo (Beennnn patched fork — check_secrets fix, Poeschl PR #6, + AI-generated commit messages, PR #14)
+description: Export all of your HA config to a git repo (Beennnn patched fork — check_secrets fix, Poeschl PR #6, AI-generated commit messages PR #14, + skip-when-deploy-pending anti-race)
 url: https://github.com/Beennnn/git-exporter
 arch:
   - aarch64
@@ -11,6 +11,7 @@ boot: manual
 init: false
 hassio_api: true
 hassio_role: manager
+homeassistant_api: true
 map:
   - config
 options:
@@ -25,6 +26,8 @@ options:
     commit_message_model: claude-haiku-4-5-20251001
     commit_message_timeout: 10
     branch_name: main
+    skip_when_deploy_pending: false
+    deployed_sha_entity: input_text.ha_deployed_sha
   export:
     lovelace: true
     addons: true
@@ -62,6 +65,8 @@ schema:
     commit_message_model: str?
     commit_message_timeout: int?
     branch_name: str
+    skip_when_deploy_pending: bool?
+    deployed_sha_entity: str?
     ssl_verification: bool?
   export:
     lovelace: bool
