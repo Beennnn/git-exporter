@@ -108,6 +108,32 @@ The Home Assistant entity holding the last-deployed commit SHA, read via the
 Supervisor's Core API. Default: `input_text.ha_deployed_sha`. Only used when
 `skip_when_deploy_pending` is `true`.
 
+### `repository.merged_branch` (Optional, default: empty = disabled)
+
+Closes the other half of the race, for setups where reviewed changes land on a
+branch (`main`) that is then fast-forwarded onto the deploy branch
+(`branch_name`). `deployed_sha_entity` only proves `/config` is in sync with the
+**deploy branch**; a change merged into `main` but not yet fast-forwarded is
+invisible to that check, so the exporter would snapshot the pre-merge `/config`
+and revert it. When set, the exporter also skips the cycle while
+`merged_branch` carries commits the deploy branch lacks **and** those commits
+change content under `deployed_subdir`.
+
+The content test matters: the merge commit that absorbs a capture PR into `main`
+has the same tree as the deploy branch, so it does not trigger a skip — otherwise
+live captures would be frozen until the next fast-forward. The reverse case (the
+deploy branch ahead of `merged_branch`, i.e. a capture waiting for its PR) is
+normal and never skips. Fail-safe: unknown branch or unreadable diff → no skip.
+Leave empty on single-branch setups. Only used when `skip_when_deploy_pending`
+is `true`.
+
+### `repository.deployed_subdir` (Optional, default: `config`)
+
+The subtree the companion deployer actually writes back to `/config` (its
+`deploy.subdir`). Only this subtree is compared by `merged_branch`: the
+export-only trees (`lovelace/`, `esphome/`, `addons/`) never travel git → HA, so
+a divergence there can't be resolved by a deploy and must not block the snapshot.
+
 ### `repository.ssl_verification` (Optional, default: true)
 
 Use this to disable the ssl verification. Can be used for self-signed certificates. __Use this only when you know what you are doing__
