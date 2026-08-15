@@ -261,6 +261,70 @@ function generate_ai_commit_message {
     printf '%s' "$ai_msg"
 }
 
+# Angle mort du garde ci-dessous : il ne voit que la branche de déploiement
+# (origin/$branch). Une modification déjà fusionnée sur la branche de revue
+# (typiquement `main`) mais pas encore fast-forwardée sur la branche de
+# déploiement est INVISIBLE — origin/$branch == deployed_sha, le garde laisse
+# passer, et le snapshot repousse le /config d'avant-fusion : la modification
+# fusionnée est annulée. Vécu le 2026-08-15 (PR #216 `unique_id` sur les capteurs
+# REST, annulée par une capture 10 min plus tard).
+#
+# On ferme donc la chaîne complète  merged_branch → branch → /config  :
+#   merge_is_pending   couvre  merged_branch en avance sur branch  (ce chaînon)
+#   deploy_is_pending  couvre  branch en avance sur /config        (deployed_sha)
+#
+# Deux conditions cumulatives, pour ne PAS geler le Workflow B (capture live) :
+#   1. merged_branch n'est pas un ancêtre de branch — elle porte des commits que
+#      la branche de déploiement n'a pas. (Le cas inverse, branch en avance, est
+#      normal : c'est une capture live en attente de PR. On ne saute pas.)
+#   2. le contenu déployable diffère réellement. Sans ce test, le merge commit
+#      qui absorbe une PR de capture dans merged_branch (même arbre, historique
+#      différent) ferait sauter la garde jusqu'au prochain fast-forward, et la
+#      capture live serait gelée pendant des heures.
+# Opt-in via repository.merged_branch (vide = désactivé). FAIL-SAFE partout :
+# branche inconnue ou diff illisible → on NE saute PAS.
+function merge_is_pending {
+    local merged_branch merged head diff_rc subdir
+
+    [ "$(bashio::config 'repository.skip_when_deploy_pending')" == 'true' ] || return 1
+
+    merged_branch="$(bashio::config 'repository.merged_branch')"
+    case "$merged_branch" in
+        ''|null) return 1 ;;
+    esac
+    # Même branche des deux côtés (topologie mono-branche) : rien à comparer.
+    [ "$merged_branch" != "$branch" ] || return 1
+
+    merged="$(git -C "$local_repository" rev-parse --verify --quiet "origin/${merged_branch}" 2>/dev/null || true)"
+    head="$(git -C "$local_repository" rev-parse --verify --quiet "origin/${branch}" 2>/dev/null || true)"
+    if [ -z "$merged" ] || [ -z "$head" ]; then
+        bashio::log.warning "Anti-course: origin/${merged_branch} ou origin/${branch} introuvable — snapshot autorisé (fail-safe)"
+        return 1
+    fi
+
+    # 1. déjà contenue dans la branche de déploiement → rien de fusionné ne manque.
+    if git -C "$local_repository" merge-base --is-ancestor "$merged" "$head" 2>/dev/null; then
+        return 1
+    fi
+
+    # 2. différence de contenu SOUS LE SOUS-DOSSIER DÉPLOYÉ uniquement. Les arbres
+    # export-only (lovelace/, esphome/, addons/) ne repartent jamais vers HA : une
+    # divergence là ne peut pas être résolue par un déploiement, la prendre en
+    # compte gèlerait la capture indéfiniment.
+    subdir="$(bashio::config 'repository.deployed_subdir')"
+    case "$subdir" in
+        ''|null) subdir='config' ;;
+    esac
+    diff_rc=0
+    git -C "$local_repository" diff --quiet "$head" "$merged" -- "$subdir" >/dev/null 2>&1 || diff_rc=$?
+    # 0 = arbres identiques (merge commit sans contenu neuf) ; 1 = vraie différence ;
+    # >1 = erreur git → fail-safe, on laisse passer.
+    [ "$diff_rc" -eq 1 ] || return 1
+
+    bashio::log.info "Anti-course: fusion non déployée (${merged_branch} ${merged:0:8} en avance sur ${branch} ${head:0:8}) — snapshot sauté"
+    return 0
+}
+
 # Skip the snapshot when a deploy is pending — supprime la course exporter/deployer.
 # git-deployer publie le SHA appliqué à /config (dans une entité HA input_text) après
 # CHAQUE déploiement réussi. Si origin/$branch est EN AVANCE sur ce SHA, c'est qu'une
@@ -309,8 +373,8 @@ bashio::log.info 'Start git export'
 
 setup_git
 
-if deploy_is_pending; then
-    bashio::log.info 'Exporter finished (snapshot sauté: déploiement en attente)'
+if merge_is_pending || deploy_is_pending; then
+    bashio::log.info 'Exporter finished (snapshot sauté: changement fusionné non appliqué à /config)'
     exit 0
 fi
 
