@@ -108,6 +108,16 @@ The Home Assistant entity holding the last-deployed commit SHA, read via the
 Supervisor's Core API. Default: `input_text.ha_deployed_sha`. Only used when
 `skip_when_deploy_pending` is `true`.
 
+**The read is retried** (6 attempts, 5 s apart) before the guard gives up and
+falls back to snapshotting. This is not defensive padding: the marker *eclipses*
+whenever the companion deployer's pass reloads the helpers — the API returns an
+empty state, then no entity at all, for a few tens of seconds. That eclipse
+happens precisely while a deploy is in flight, so a single failed read would drop
+the guard exactly when it is needed and let the capture revert the just-merged
+change. Retrying tells the two cases apart: an eclipse resolves within seconds, a
+real outage (deployer dead, entity deleted, API down) outlives the window and
+still fail-safes to snapshotting, preserving Workflow B.
+
 ### `repository.merged_branch` (Optional, default: empty = disabled)
 
 Closes the other half of the race, for setups where reviewed changes land on a

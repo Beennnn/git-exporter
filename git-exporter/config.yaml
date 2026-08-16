@@ -1,5 +1,5 @@
 name: Home Assistant Git Exporter (patched)
-version: "1.17.1-beennnn.6"
+version: "1.17.1-beennnn.7"
 slug: git-exporter
 description: Export all of your HA config to a git repo (Beennnn patched fork — check_secrets fix, Poeschl PR #6, AI-generated commit messages PR #14, + skip-when-deploy-pending anti-race)
 url: https://github.com/Beennnn/git-exporter

@@ -351,14 +351,44 @@ function deploy_is_pending {
         entity='input_text.ha_deployed_sha'
     fi
 
-    # shellcheck disable=SC2154  # SUPERVISOR_TOKEN is injected by the Supervisor at runtime
-    deployed="$(curl -sSL -m 10 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
-        "http://supervisor/core/api/states/${entity}" 2>/dev/null \
-        | jq -r '.state // empty' 2>/dev/null || true)"
+    # Le marqueur s'ÉCLIPSE le temps que la passe du deployer recharge les helpers
+    # (`reload_all`) : l'API renvoie d'abord un état vide, puis l'entité carrément absente,
+    # pendant quelques dizaines de secondes. Sans réessai, la garde retombe en fail-safe
+    # (« illisible → je capture ») PILE dans la fenêtre où un déploiement est en cours — et
+    # la capture reverte la PR qu'on vient de merger. Vécu le 2026-08-16 : un redémarrage du
+    # deployer a suffi à faire annuler la PR #226 par la capture suivante.
+    #
+    # On réessaie donc avant de conclure : une éclipse de rechargement se résorbe en
+    # quelques secondes, une vraie panne (deployer mort, entité supprimée, API HS) persiste
+    # au-delà de la fenêtre. Le fail-safe est CONSERVÉ pour ce second cas — c'est le choix
+    # explicite du design (ne jamais casser le Workflow B en silence) — mais il ne se
+    # déclenche plus sur une simple éclipse. Surchargeables pour les tests.
+    local attempts="${DEPLOYED_SHA_READ_ATTEMPTS:-6}"
+    local delay="${DEPLOYED_SHA_READ_DELAY:-5}"
+    local attempt=0
+
+    deployed=''
+    while [ "$attempt" -lt "$attempts" ]; do
+        # shellcheck disable=SC2154  # SUPERVISOR_TOKEN is injected by the Supervisor at runtime
+        deployed="$(curl -sSL -m 10 -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+            "http://supervisor/core/api/states/${entity}" 2>/dev/null \
+            | jq -r '.state // empty' 2>/dev/null || true)"
+
+        case "$deployed" in
+            ''|null|unknown|unavailable) ;;
+            *) break ;;
+        esac
+
+        attempt=$((attempt + 1))
+        if [ "$attempt" -lt "$attempts" ]; then
+            bashio::log.info "Anti-course: ${entity} illisible (${attempt}/${attempts}) — nouvel essai dans ${delay}s"
+            sleep "$delay"
+        fi
+    done
 
     case "$deployed" in
         ''|null|unknown|unavailable)
-            bashio::log.warning "Anti-course: ${entity} illisible — snapshot autorisé (fail-safe)"
+            bashio::log.warning "Anti-course: ${entity} illisible après ${attempts} essais — snapshot autorisé (fail-safe)"
             return 1 ;;
     esac
 
