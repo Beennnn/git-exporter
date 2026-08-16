@@ -9,6 +9,9 @@
 #   3. head != deployed          -> PENDING (skip: a merged change isn't on /config yet)
 #   4. marker unknown/empty      -> fail-safe: not pending (Workflow B preserved)
 #   5. no known remote head      -> fail-safe: not pending
+#   6. marker eclipsed briefly   -> retry sees it: PENDING (or not, if it comes back
+#                                   on the current head) — the 2026-08-16 hole
+#   7. eclipse outlasts retries  -> fail-safe preserved (real outage)
 #
 # Real git + jq are used; curl is stubbed via a PATH shim driven by $FAKE_STATE.
 # Requires jq + git; skips cleanly without them.
@@ -28,6 +31,18 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+# FAKE_ECLIPSE=N : the marker is missing for the first N calls, then readable.
+# Models the real failure mode — the entity vanishes while the deployer's pass
+# reloads the helpers — rather than a steadily unreadable marker.
+if [ -n "${FAKE_ECLIPSE:-}" ]; then
+  # Default to 0 on a missing OR EMPTY counter file: an empty $n would make the
+  # comparison below error out, the eclipse would never happen, and the test would
+  # pass for the wrong reason (caught while writing case 7).
+  n="$(cat "$FAKE_CALLS" 2>/dev/null || true)"
+  [ -n "$n" ] || n=0
+  echo $((n + 1)) > "$FAKE_CALLS"
+  if [ "$n" -lt "$FAKE_ECLIPSE" ]; then printf '%s' ''; exit 0; fi
+fi
 case "${FAKE_STATE:-}" in
   "")      printf '%s' '' ;;                            # unreadable / empty body
   unknown) printf '%s' '{"state":"unknown"}' ;;
@@ -37,6 +52,9 @@ EOF
 chmod +x "$TMP/bin/curl"
 export PATH="$TMP/bin:$PATH"
 export SUPERVISOR_TOKEN=dummy
+export FAKE_CALLS="$TMP/calls"
+# No real waiting between retries; the retry COUNT is what the assertions exercise.
+export DEPLOYED_SHA_READ_DELAY=0
 
 # --- stub bashio::config (per key) + bashio::log.* (no-ops) ------------------
 bashio::config() {
@@ -82,6 +100,25 @@ fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
 
 # 4'. guard ON, marker empty/unreadable -> fail-safe not pending
 ( export CFG_ENABLED=true FAKE_STATE=''; deploy_is_pending ) && fail "4': empty marker must fail-safe"
+
+# 6. ÉCLIPSE — the marker is gone for the first 3 reads (the deployer's reload_all),
+#    then comes back on the OLD sha: the retry must see it and PEND instead of
+#    fail-safing into a capture that would revert the just-merged PR (2026-08-16, #226).
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true FAKE_ECLIPSE=3 FAKE_STATE=0000000000000000000000000000000000000000
+  deploy_is_pending ) || fail "6: a transient eclipse must not fall through to fail-safe"
+
+# 6'. Same eclipse, but the deployer finishes during the retries and publishes the
+#     current head -> /config is up to date, capturing is correct.
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true FAKE_ECLIPSE=3 FAKE_STATE="$HEAD_SHA"
+  deploy_is_pending ) && fail "6': eclipse resolving to head must not be pending"
+
+# 7. The eclipse outlasts every retry (real outage: deployer dead, entity deleted,
+#    API down) -> fail-safe is PRESERVED, Workflow B is never silently broken.
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true FAKE_ECLIPSE=99 DEPLOYED_SHA_READ_ATTEMPTS=3 FAKE_STATE=deadbeef
+  deploy_is_pending ) && fail "7: a lasting outage must still fail-safe"
 
 # 5. guard ON, no known remote head -> fail-safe not pending
 git -C "$local_repository" update-ref -d "refs/remotes/origin/${branch}"
