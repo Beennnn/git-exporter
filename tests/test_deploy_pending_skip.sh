@@ -11,7 +11,9 @@
 #   5. no known remote head      -> fail-safe: not pending
 #   6. marker eclipsed briefly   -> retry sees it: PENDING (or not, if it comes back
 #                                   on the current head) — the 2026-08-16 hole
-#   7. eclipse outlasts retries  -> fail-safe preserved (real outage)
+#   7. eclipse outlasts retries  -> fail-safe by default (real outage)
+#   8. same, fail_closed ON      -> PENDING: the durable-outage arbitration (beennnn.8)
+#   9. guard_status              -> every branch reports itself, so a skip is never silent
 #
 # Real git + jq are used; curl is stubbed via a PATH shim driven by $FAKE_STATE.
 # Requires jq + git; skips cleanly without them.
@@ -61,6 +63,7 @@ bashio::config() {
   case "$1" in
     repository.skip_when_deploy_pending) printf '%s' "${CFG_ENABLED:-false}" ;;
     repository.deployed_sha_entity)      printf '%s' "${CFG_ENTITY:-}" ;;
+    repository.fail_closed_when_marker_unreadable) printf '%s' "${CFG_FAIL_CLOSED:-false}" ;;
     *) printf '' ;;
   esac
 }
@@ -95,10 +98,10 @@ fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
 # 3. guard ON, head != deployed -> PENDING (skip)
 ( export CFG_ENABLED=true FAKE_STATE=0000000000000000000000000000000000000000; deploy_is_pending ) || fail "3: head!=deployed must be pending"
 
-# 4. guard ON, marker unknown -> fail-safe not pending
+# 4. guard ON, marker unknown, fail_closed OFF -> fail-safe not pending
 ( export CFG_ENABLED=true FAKE_STATE=unknown; deploy_is_pending ) && fail "4: unknown marker must fail-safe"
 
-# 4'. guard ON, marker empty/unreadable -> fail-safe not pending
+# 4'. guard ON, marker empty/unreadable, fail_closed OFF -> fail-safe not pending
 ( export CFG_ENABLED=true FAKE_STATE=''; deploy_is_pending ) && fail "4': empty marker must fail-safe"
 
 # 6. ÉCLIPSE — the marker is gone for the first 3 reads (the deployer's reload_all),
@@ -115,10 +118,52 @@ echo 0 > "$FAKE_CALLS"
   deploy_is_pending ) && fail "6': eclipse resolving to head must not be pending"
 
 # 7. The eclipse outlasts every retry (real outage: deployer dead, entity deleted,
-#    API down) -> fail-safe is PRESERVED, Workflow B is never silently broken.
+#    API down) and fail_closed is OFF -> historical fail-safe is preserved.
 echo 0 > "$FAKE_CALLS"
 ( export CFG_ENABLED=true FAKE_ECLIPSE=99 DEPLOYED_SHA_READ_ATTEMPTS=3 FAKE_STATE=deadbeef
-  deploy_is_pending ) && fail "7: a lasting outage must still fail-safe"
+  deploy_is_pending ) && fail "7: a lasting outage must fail-safe when fail_closed is off"
+
+# 8. Same durable outage, fail_closed ON -> the guard ABSTAINS. This is the arbitration
+#    of 2026-08-16: no more blind capture, hence no more silent revert. Only tenable
+#    because the abstention is reported (case 9) instead of freezing capture in silence.
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true CFG_FAIL_CLOSED=true FAKE_ECLIPSE=99 DEPLOYED_SHA_READ_ATTEMPTS=3 FAKE_STATE=deadbeef
+  deploy_is_pending ) || fail "8: a lasting outage must skip when fail_closed is on"
+
+# 8'. fail_closed must NOT change the nominal branches: a readable marker equal to head
+#     still means "nothing pending", otherwise the flag would freeze capture outright.
+( export CFG_ENABLED=true CFG_FAIL_CLOSED=true FAKE_STATE="$HEAD_SHA"
+  deploy_is_pending ) && fail "8': fail_closed must not skip when the marker is current"
+
+# 9. guard_status — each outcome names itself, so the consumer alerts on a POSITIVE
+#    state instead of inferring a freeze from silence (the two watchdogs that were
+#    disabled for false positives, letting a 7-day outage through).
+check_status() { # <expected> <label> ; runs in the caller's shell so guard_status survives
+  [ "$guard_status" = "$1" ] || fail "9: $2 must report $1, got '${guard_status}'"
+}
+
+guard_status=OK
+echo 0 > "$FAKE_CALLS"
+export CFG_ENABLED=true CFG_FAIL_CLOSED=true FAKE_ECLIPSE=99 DEPLOYED_SHA_READ_ATTEMPTS=3 FAKE_STATE=deadbeef
+deploy_is_pending || true
+check_status MARKER_UNREADABLE "a durable outage (fail-closed)"
+
+guard_status=OK
+unset FAKE_ECLIPSE
+export CFG_FAIL_CLOSED=false FAKE_STATE=unknown
+deploy_is_pending || true
+check_status MARKER_UNREADABLE "a durable outage (fail-safe, capture went ahead blind)"
+
+guard_status=OK
+export FAKE_STATE=0000000000000000000000000000000000000000
+deploy_is_pending || true
+check_status DEPLOY_PENDING "a pending deploy"
+
+guard_status=OK
+export FAKE_STATE="$HEAD_SHA"
+deploy_is_pending || true
+check_status OK "a marker already on head"
+unset CFG_ENABLED CFG_FAIL_CLOSED FAKE_STATE
 
 # 5. guard ON, no known remote head -> fail-safe not pending
 git -C "$local_repository" update-ref -d "refs/remotes/origin/${branch}"
