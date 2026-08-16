@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Tests for the `!secret <key>` indirection that keeps credentials out of the add-on
+# Tests for the `secret://<key>` indirection that keeps credentials out of the add-on
 # options (see DOCS.md § "Keeping secrets out of the add-on options").
 #
 # Why this exists. Supervisor stores add-on options in clear text and returns them in
@@ -17,7 +17,12 @@
 #      else, not even in an error message. Otherwise the leak just moved.
 #   3. ERRORS NAME THE KEY — without it, a typo in the key name and a revoked token
 #      produce the same unreadable 401.
-#   4. PARSING HOLDS — quotes, end-of-line comments, indented keys. A mis-split value
+#   4. THE PREFIX IS `secret://`, NOT `!secret` — Supervisor supports `!secret` natively
+#      but RESOLVES it before answering the API: measured 2026-08-16, an option using
+#      `!secret` still comes back in clear text from `ha apps info --raw-json`, so it
+#      does NOT close the leak. `secret://` means nothing to Supervisor, which passes it
+#      through untouched — that is what keeps the API down to the key name.
+#   5. PARSING HOLDS — quotes, end-of-line comments, indented keys. A mis-split value
 #      is a silently wrong credential, i.e. a failure diagnosed on the wrong side.
 #   5. THE TWO CALL SITES DIFFER ON PURPOSE — no git password means no push, so that
 #      one fails the run; the AI commit message is opt-in and contractually degrades
@@ -36,7 +41,7 @@ trap 'rm -rf "$T"' EXIT
 fail=0
 ok()    { printf '  ✅ %s\n' "$1"; }
 ko()    { printf '  ❌ %s\n' "$1"; fail=1; }
-check() { if [ "$2" = "$3" ]; then ok "$1"; else ko "$1 (expected «$3», got «$2»)"; fi; }
+check() { if [ "$2" = "$3" ]; then ok "$1"; else ko "$1 (expected «${3}», got «${2}»)"; fi; }
 
 # --- the real function, extracted from run.sh -------------------------------
 sed -n '/^resolve_secret() {/,/^}/p' "$RUN_SH" > "$T/fn.sh"
@@ -73,26 +78,30 @@ check "empty value returned unchanged" \
   "$(resolve_secret '' 'repository.password')" ''
 check "'!secretfoo' is NOT an indirection (prefix is '!secret' + space)" \
   "$(resolve_secret '!secretfoo' 'repository.password')" '!secretfoo'
+check "'secret:/foo' is NOT an indirection (prefix is 'secret://')" \
+  "$(resolve_secret 'secret:/foo' 'repository.password')" 'secret:/foo'
 
 # 2. Nominal resolution and parsing variants.
-check "plain key"           "$(resolve_secret '!secret github_pat_exporter' 'p')" 'github_pat_11ABCDEF_bare'
-check "double quotes strip" "$(resolve_secret '!secret quoted_double' 'p')"       'github_pat_11ABCDEF_double'
-check "single quotes strip" "$(resolve_secret '!secret quoted_single' 'p')"       'github_pat_11ABCDEF_single'
+check "plain key (secret://)" "$(resolve_secret 'secret://github_pat_exporter' 'p')" 'github_pat_11ABCDEF_bare'
+check "'!secret' still accepted as a net" \
+  "$(resolve_secret '!secret github_pat_exporter' 'p')" 'github_pat_11ABCDEF_bare'
+check "double quotes strip" "$(resolve_secret 'secret://quoted_double' 'p')"       'github_pat_11ABCDEF_double'
+check "single quotes strip" "$(resolve_secret 'secret://quoted_single' 'p')"       'github_pat_11ABCDEF_single'
 check "end-of-line comment dropped" \
-  "$(resolve_secret '!secret with_comment' 'p')" 'github_pat_11ABCDEF_cmt'
+  "$(resolve_secret 'secret://with_comment' 'p')" 'github_pat_11ABCDEF_cmt'
 check "'#' glued to the text kept (YAML needs a space before a comment)" \
-  "$(resolve_secret '!secret hash_glued' 'p')" 'token#inner'
+  "$(resolve_secret 'secret://hash_glued' 'p')" 'token#inner'
 check "value containing ':' kept whole" \
-  "$(resolve_secret '!secret with_colon' 'p')" 'https://example.test/path'
+  "$(resolve_secret 'secret://with_colon' 'p')" 'https://example.test/path'
 check "padding around the value stripped" \
-  "$(resolve_secret '!secret padded' 'p')" 'github_pat_11ABCDEF_pad'
+  "$(resolve_secret 'secret://padded' 'p')" 'github_pat_11ABCDEF_pad'
 check "padding around the KEY name tolerated" \
-  "$(resolve_secret '!secret   github_pat_exporter  ' 'p')" 'github_pat_11ABCDEF_bare'
+  "$(resolve_secret 'secret://  github_pat_exporter  ' 'p')" 'github_pat_11ABCDEF_bare'
 check "anthropic key resolves too" \
-  "$(resolve_secret '!secret anthropic_api_key' 'repository.commit_message_api_key')" 'sk-ant-api03-FAKEKEYFORTESTS'
+  "$(resolve_secret 'secret://anthropic_api_key' 'repository.commit_message_api_key')" 'sk-ant-api03-FAKEKEYFORTESTS'
 
 # 3. The secret goes to stdout (the return channel) and nowhere else.
-out="$(resolve_secret '!secret github_pat_exporter' 'repository.password' 2>"$T/err")"
+out="$(resolve_secret 'secret://github_pat_exporter' 'repository.password' 2>"$T/err")"
 check "resolution is silent: nothing on stderr" "$(wc -c <"$T/err" | tr -d ' ')" '0'
 check "value actually returned"                 "$out" 'github_pat_11ABCDEF_bare'
 
@@ -102,7 +111,7 @@ expect_fail() { # expect_fail LABEL VALUE NEEDLE
   ( resolve_secret "$value" 'repository.password' ) >"$T/out" 2>"$T/err" || rc=$?
   if [ "$rc" -eq 0 ]; then ko "$label (should have failed)"; return; fi
   if ! grep -qF -- "$needle" "$T/err"; then
-    ko "$label (message does not name «$needle»: $(tr -d '\n' <"$T/err"))"; return
+    ko "$label (message does not name «${needle}»: $(tr -d '\n' <"$T/err"))"; return
   fi
   if grep -qF -- 'github_pat_11ABCDEF' "$T/err" "$T/out"; then
     ko "$label (the secret leaked into the output)"; return
@@ -110,14 +119,14 @@ expect_fail() { # expect_fail LABEL VALUE NEEDLE
   ok "$label"
 }
 
-expect_fail "missing key → message names the key"      '!secret not_in_the_file' 'not_in_the_file'
-expect_fail "key present but empty → explicit failure" '!secret empty'           'empty'
-expect_fail "'!secret' with no key name → explicit failure" '!secret '           '!secret'
-expect_fail "indented key ignored (flat mapping expected)"  '!secret inner'      'inner'
+expect_fail "missing key → message names the key"      'secret://not_in_the_file' 'not_in_the_file'
+expect_fail "key present but empty → explicit failure" 'secret://empty'          'empty'
+expect_fail "indirection with no key name → explicit failure" 'secret://'          'secret://<key>'
+expect_fail "indented key ignored (flat mapping expected)"  'secret://inner'     'inner'
 
 SECRETS_FILE="$T/missing.yaml"
 expect_fail "missing secrets.yaml → message names the file AND the key" \
-  '!secret github_pat_exporter' 'github_pat_exporter'
+  'secret://github_pat_exporter' 'github_pat_exporter'
 SECRETS_FILE="$T/secrets.yaml"
 
 # 5. The two call sites in run.sh, and their deliberate asymmetry.
@@ -138,7 +147,7 @@ else
   # the substitution has already run, so the error would land on the terminal instead.
   got="$( (
     set -e
-    bashio::config() { printf '%s' '!secret not_in_the_file'; }
+    bashio::config() { printf '%s' 'secret://not_in_the_file'; }
     eval "$callsite"
     printf '%s' "${ai_api_key}"
   ) 2>"$T/err" )" || rc=$?
@@ -153,7 +162,7 @@ else
   rc=0
   got="$(
     set -e
-    bashio::config() { printf '%s' '!secret anthropic_api_key'; }
+    bashio::config() { printf '%s' 'secret://anthropic_api_key'; }
     eval "$callsite"
     printf '%s' "${ai_api_key}"
   )" || rc=$?

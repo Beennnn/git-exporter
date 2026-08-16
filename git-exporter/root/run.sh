@@ -10,8 +10,8 @@ pull_before_push="$(bashio::config 'repository.pull_before_push')"
 # Home Assistant's secrets file. Overridable through the environment for tests.
 SECRETS_FILE="${SECRETS_FILE:-/config/secrets.yaml}"
 
-# resolve_secret VALUE FIELD — resolve a `!secret <key>` indirection against
-# secrets.yaml, printing the resolved value on stdout.
+# resolve_secret VALUE FIELD — resolve an indirection to a secrets.yaml key, in either
+# form — `secret://<key>` (the one to use) or `!secret <key>` — onto stdout.
 #
 # WHY. Supervisor stores add-on options in CLEAR TEXT and hands them back in clear
 # text to ANY API call — `ha apps info <slug> --raw-json` and the REST endpoint
@@ -25,6 +25,19 @@ SECRETS_FILE="${SECRETS_FILE:-/config/secrets.yaml}"
 # The fix is to store the NAME of a /config/secrets.yaml key in the option instead of
 # the secret itself. Supervisor does not serve that file over its API and git ignores
 # it, so a diagnostic can only ever reveal the name, which is worthless alone.
+#
+# WHY `secret://` AND NOT `!secret`. Supervisor supports the `!secret` prefix natively,
+# but it RESOLVES it before answering: measured on Supervisor 2026.08 (2026-08-16), the
+# stored option does keep the literal — the error on an unknown key shows it — yet
+# `GET /addons/<slug>/info` returns the RESOLVED value, in clear text. An option using
+# `!secret` therefore does NOT close the leak this exists for: the diagnostic prints
+# the credential exactly as before. Confirmed by cross-check — pointing one add-on at
+# the other's key made the API hand back the other's token. `secret://` means nothing
+# to Supervisor, so it is passed through untouched, resolved here, and the API can only
+# ever return the key name.
+#
+# `!secret` stays accepted as a safety net, but Supervisor having already resolved it,
+# the add-on never actually sees that form.
 #
 # Backward compatible by construction: a value without the prefix is returned as-is,
 # so the switch can be made one option at a time, with no breaking window.
@@ -40,16 +53,17 @@ SECRETS_FILE="${SECRETS_FILE:-/config/secrets.yaml}"
 resolve_secret() {
     local raw="${1-}" field="${2-option}" key='' line k v='' q rest found=0
     case "$raw" in
-        '!secret '*) key="${raw#'!secret '}" ;;
+        'secret://'*) key="${raw#secret://}" ;;
+        '!secret '*)  key="${raw#'!secret '}" ;;
         *) printf '%s' "$raw"; return 0 ;;
     esac
 
     key="${key#"${key%%[![:space:]]*}"}"   # trim left
     key="${key%"${key##*[![:space:]]}"}"   # trim right
     [ -n "$key" ] || bashio::exit.nok \
-        "${field}: '!secret' without a key name — write '!secret <key>', <key> being an entry of ${SECRETS_FILE}."
+        "${field}: indirection without a key name — write 'secret://<key>', <key> being an entry of ${SECRETS_FILE}."
     [ -r "$SECRETS_FILE" ] || bashio::exit.nok \
-        "${field}: '!secret ${key}' requested, but ${SECRETS_FILE} is missing or unreadable."
+        "${field}: 'secret://${key}' requested, but ${SECRETS_FILE} is missing or unreadable."
 
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
@@ -80,7 +94,7 @@ resolve_secret() {
     done < "$SECRETS_FILE"
 
     [ "$found" = 1 ] || bashio::exit.nok \
-        "${field}: key '${key}' not found in ${SECRETS_FILE} (exact name expected, without the '!secret ' prefix)."
+        "${field}: key '${key}' not found in ${SECRETS_FILE} (exact name expected, without the 'secret://' prefix)."
     [ -n "$v" ] || bashio::exit.nok \
         "${field}: key '${key}' exists in ${SECRETS_FILE} but its value is empty."
     printf '%s' "$v"

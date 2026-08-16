@@ -4,7 +4,7 @@
 repository:
   url: <path to your repository>
   username: user
-  password: "!secret github_pat_exporter"   # or the raw token — but see below
+  password: "secret://github_pat_exporter"  # or the raw token — but see below
   pull_before_push: true
   commit_message: 'Home Assistant Git Exporter'
   commit_message_prompt: ''
@@ -52,7 +52,7 @@ Your username for https authentication.
 
 Your password or [__access token__](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) for your repository.
 
-Prefer `!secret <key>` over pasting the token — see
+Prefer `secret://<key>` over pasting the token — see
 [Keeping secrets out of the add-on options](#keeping-secrets-out-of-the-add-on-options).
 A missing or empty key stops the run: without a credential there is no push, and
 failing on the key name beats failing later on an unreadable `401`.
@@ -75,13 +75,13 @@ staged diff is appended to this prompt automatically.
 ### `repository.commit_message_api_key` (Optional)
 
 Anthropic API key. **This is the on/off switch**: when set (e.g. via
-`!secret anthropic_api_key`, see
+`secret://anthropic_api_key`, see
 [Keeping secrets out of the add-on options](#keeping-secrets-out-of-the-add-on-options)),
 each commit message is generated from the actual diff by the model. When empty
 (default), the static `commit_message` is used — no API call is made. Any API failure
 or timeout silently falls back to the static message, so a commit is never blocked.
 
-A broken `!secret` indirection is treated the same way: the missing key is logged and
+A broken `secret://` indirection is treated the same way: the missing key is logged and
 the export carries on with the static message. This key is opt-in and billed per use,
 so a typo in it must not take the whole snapshot down — unlike `repository.password`,
 without which nothing can be pushed at all.
@@ -274,13 +274,27 @@ anthropic_api_key: sk-ant-api03-…
 ```yaml
 # add-on options — this is all the API can ever hand back now
 repository:
-  password: "!secret github_pat_exporter"
-  commit_message_api_key: "!secret anthropic_api_key"
+  password: "secret://github_pat_exporter"
+  commit_message_api_key: "secret://anthropic_api_key"
 ```
 
-Any value starting with `!secret ` is read from `/config/secrets.yaml` when the
+Any value starting with `secret://` is read from `/config/secrets.yaml` when the
 add-on runs; anything else is used as-is, so **existing setups keep working untouched**
 and you can switch one option at a time.
+
+### Why `secret://` and not Home Assistant's own `!secret`
+
+Supervisor understands `!secret <key>` in add-on options — but it **resolves the value
+before answering the API**. Measured on Supervisor 2026.08 (2026-08-16): the stored
+option does keep the literal (the error raised on an unknown key proves it), yet
+`GET /addons/<slug>/info` returns the *resolved* credential, in clear text. Confirmed by
+cross-check: pointing one add-on at another's key made the API hand back that other
+token. `!secret` alone therefore does **not** close this leak — the diagnostic prints
+the credential exactly as before.
+
+`secret://` means nothing to Supervisor, which passes the string through untouched. The
+add-on resolves it itself, so the API can only ever return the key name. `!secret` stays
+accepted as a safety net, but in practice the add-on never sees that form.
 
 Things worth knowing:
 
