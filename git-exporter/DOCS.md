@@ -148,6 +148,12 @@ this same pipeline were disabled twice for false positives, and their absence
 then hid a real 7-day outage. `OK` is written last, after the push, so it means
 the cycle finished rather than started.
 
+A cycle that finds the configuration unchanged reports `OK` like any other: it
+did its job, there was simply nothing to export. Until `beennnn.9` such a cycle
+died on the empty `git commit` before publishing anything, which left the add-on
+in `error` and this entity frozen on its previous value — so a quiet evening was
+indistinguishable from a dead token.
+
 ### `repository.merged_branch` (Optional, default: empty = disabled)
 
 Closes the other half of the race, for setups where reviewed changes land on a

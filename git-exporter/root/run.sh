@@ -517,12 +517,36 @@ else
         fi
     fi
 
-    git commit -m "$commit_message"
-
-    if [ ! "$pull_before_push" == 'true' ]; then
-        git push --set-upstream origin "$branch" -f
+    # `git commit` sort en code NON NUL quand il n'y a rien à commiter — ce n'est pas une
+    # erreur, c'est le cas NOMINAL de toute passe où la config n'a pas bougé. Combiné au
+    # `set -e` de la ligne 2, ça tuait le script ICI : pas de push, pas de publish_status,
+    # pas de « Exporter finished », et l'add-on finissait en état `error`.
+    #
+    # Le vrai dégât n'est pas l'état affiché mais la perte du compte-rendu : la conception
+    # de beennnn.8 (voir publish_status) repose sur un état écrit à CHAQUE passe, justement
+    # pour ne plus déduire la panne d'un silence. Une soirée sans changement de config
+    # laissait donc l'entité de statut figée sur sa valeur précédente — le seul signal de
+    # santé que le consommateur surveille — tout en teintant l'add-on en rouge. Résultat :
+    # « rien à faire » devenait indiscernable d'un jeton mort ou d'un dépôt injoignable.
+    if git diff --cached --quiet; then
+        bashio::log.info 'Nothing to commit — config unchanged since last export'
     else
-        git push origin HEAD:"$branch"
+        git commit -m "$commit_message"
+    fi
+
+    # Le push reste INCONDITIONNEL (hors dépôt encore vierge, où il n'y a pas de ref à
+    # pousser). Sur une branche déjà à jour c'est un no-op, mais si une passe précédente a
+    # commité SANS réussir à pousser (jeton expiré, DNS, dépôt injoignable — cf. le fix
+    # beennnn.3), le commit resté en local repart au cycle suivant au lieu d'attendre le
+    # prochain changement de config pour être découvert.
+    if git rev-parse --verify --quiet HEAD >/dev/null; then
+        if [ ! "$pull_before_push" == 'true' ]; then
+            git push --set-upstream origin "$branch" -f
+        else
+            git push origin HEAD:"$branch"
+        fi
+    else
+        bashio::log.warning 'Dépôt local sans aucun commit — rien à pousser'
     fi
 fi
 
