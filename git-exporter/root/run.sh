@@ -498,9 +498,25 @@ function deploy_is_pending {
     # quelques secondes, une vraie panne (deployer mort, entité supprimée, API HS) persiste
     # au-delà de la fenêtre. Le fail-safe est CONSERVÉ pour ce second cas — c'est le choix
     # explicite du design (ne jamais casser le Workflow B en silence) — mais il ne se
-    # déclenche plus sur une simple éclipse. Surchargeables pour les tests.
-    local attempts="${DEPLOYED_SHA_READ_ATTEMPTS:-6}"
-    local delay="${DEPLOYED_SHA_READ_DELAY:-5}"
+    # déclenche plus sur une simple éclipse.
+    #
+    # LE BUDGET N'EST PAS attempts × delay. Mesuré sur le journal le 2026-08-16 : les lignes
+    # « illisible (n/6) » sont espacées de 15 s, pas de 5 s. Pendant le `reload_all` l'API
+    # Core ne répond pas du tout, donc le curl va au bout de son -m 10 au lieu de renvoyer
+    # un 404 immédiat. Chaque tour coûte ~15 s et le budget vaut, au pire,
+    # attempts × 10 + (attempts − 1) × delay — soit ~85 s pour les 6 essais d'origine, et
+    # non les 30 s qu'annonçaient la doc et le watchdog consommateur.
+    #
+    # L'éclipse observée ce jour-là a duré ≥ 76 s : elle a consommé 5 des 6 essais, donc
+    # UN essai de marge. Comme `fail_closed_when_marker_unreadable` transforme désormais
+    # l'épuisement du budget en abstention + alerte, une marge d'un essai signifierait une
+    # alerte au moindre rechargement un peu lent. D'où le défaut à 12 essais (~3 min) :
+    # trois fois la pire éclipse connue. Réglable sans reconstruire l'add-on, parce que la
+    # bonne valeur dépend de la machine — l'environnement l'emporte, pour les tests.
+    local attempts="${DEPLOYED_SHA_READ_ATTEMPTS:-$(bashio::config 'repository.deployed_sha_read_attempts')}"
+    local delay="${DEPLOYED_SHA_READ_DELAY:-$(bashio::config 'repository.deployed_sha_read_delay')}"
+    case "$attempts" in ''|null) attempts=12 ;; esac
+    case "$delay"    in ''|null) delay=5    ;; esac
     local attempt=0
 
     deployed=''

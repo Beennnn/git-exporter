@@ -14,6 +14,7 @@
 #   7. eclipse outlasts retries  -> fail-safe by default (real outage)
 #   8. same, fail_closed ON      -> PENDING: the durable-outage arbitration (beennnn.8)
 #   9. guard_status              -> every branch reports itself, so a skip is never silent
+#  10. retry budget from options -> the budget is tunable without rebuilding (beennnn.13)
 #
 # Real git + jq are used; curl is stubbed via a PATH shim driven by $FAKE_STATE.
 # Requires jq + git; skips cleanly without them.
@@ -64,6 +65,10 @@ bashio::config() {
     repository.skip_when_deploy_pending) printf '%s' "${CFG_ENABLED:-false}" ;;
     repository.deployed_sha_entity)      printf '%s' "${CFG_ENTITY:-}" ;;
     repository.fail_closed_when_marker_unreadable) printf '%s' "${CFG_FAIL_CLOSED:-false}" ;;
+    # Empty by default: an unset add-on option must fall back to the built-in budget,
+    # which is what a fresh install actually does.
+    repository.deployed_sha_read_attempts) printf '%s' "${CFG_READ_ATTEMPTS:-}" ;;
+    repository.deployed_sha_read_delay)    printf '%s' "${CFG_READ_DELAY:-0}" ;;
     *) printf '' ;;
   esac
 }
@@ -134,6 +139,26 @@ echo 0 > "$FAKE_CALLS"
 #     still means "nothing pending", otherwise the flag would freeze capture outright.
 ( export CFG_ENABLED=true CFG_FAIL_CLOSED=true FAKE_STATE="$HEAD_SHA"
   deploy_is_pending ) && fail "8': fail_closed must not skip when the marker is current"
+
+# 10. The retry budget comes from the ADD-ON OPTION, not just the environment. Before
+#     beennnn.13 the two knobs existed in run.sh but were env-only, so the sole way to
+#     widen the budget was to rebuild the image. These two cases pin the plumbing: same
+#     4-read eclipse, opposite verdicts, decided only by the option.
+#     (No DEPLOYED_SHA_READ_ATTEMPTS here on purpose — that would bypass what's tested.)
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true CFG_READ_ATTEMPTS=2 FAKE_ECLIPSE=4 FAKE_STATE=0000000000000000000000000000000000000000
+  deploy_is_pending ) && fail "10: a budget of 2 must not outlast a 4-read eclipse"
+
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true CFG_READ_ATTEMPTS=6 FAKE_ECLIPSE=4 FAKE_STATE=0000000000000000000000000000000000000000
+  deploy_is_pending ) || fail "10': a budget of 6 must outlast the same eclipse and PEND"
+
+# 10''. Neither env nor option set -> the built-in default (12) applies, so an eclipse
+#       that used to exhaust the old 6-read budget is now absorbed. This is the whole
+#       point of the 2026-08-16 measurement: 76 s of eclipse ate 5 of the 6 old attempts.
+echo 0 > "$FAKE_CALLS"
+( export CFG_ENABLED=true FAKE_ECLIPSE=8 FAKE_STATE=0000000000000000000000000000000000000000
+  deploy_is_pending ) || fail "10'': the default budget must absorb an 8-read eclipse"
 
 # 9. guard_status — each outcome names itself, so the consumer alerts on a POSITIVE
 #    state instead of inferring a freeze from silence (the two watchdogs that were
