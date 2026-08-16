@@ -4,7 +4,7 @@
 repository:
   url: <path to your repository>
   username: user
-  password: pass
+  password: "!secret github_pat_exporter"   # or the raw token — but see below
   pull_before_push: true
   commit_message: 'Home Assistant Git Exporter'
   commit_message_prompt: ''
@@ -52,6 +52,11 @@ Your username for https authentication.
 
 Your password or [__access token__](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) for your repository.
 
+Prefer `!secret <key>` over pasting the token — see
+[Keeping secrets out of the add-on options](#keeping-secrets-out-of-the-add-on-options).
+A missing or empty key stops the run: without a credential there is no push, and
+failing on the key name beats failing later on an unreadable `401`.
+
 ### `repository.pull_before_push`
 
 Should the repository be pulled first and commit the new state on top?
@@ -70,10 +75,16 @@ staged diff is appended to this prompt automatically.
 ### `repository.commit_message_api_key` (Optional)
 
 Anthropic API key. **This is the on/off switch**: when set (e.g. via
-`!secret anthropic_api_key`), each commit message is generated from the actual
-diff by the model. When empty (default), the static `commit_message` is used —
-no API call is made. Any API failure or timeout silently falls back to the
-static message, so a commit is never blocked.
+`!secret anthropic_api_key`, see
+[Keeping secrets out of the add-on options](#keeping-secrets-out-of-the-add-on-options)),
+each commit message is generated from the actual diff by the model. When empty
+(default), the static `commit_message` is used — no API call is made. Any API failure
+or timeout silently falls back to the static message, so a commit is never blocked.
+
+A broken `!secret` indirection is treated the same way: the missing key is logged and
+the export carries on with the static message. This key is opt-in and billed per use,
+so a typo in it must not take the whole snapshot down — unlike `repository.password`,
+without which nothing can be pushed at all.
 
 ### `repository.commit_message_model` (Optional)
 
@@ -240,6 +251,50 @@ Additional allowed secrets which will not make the secret check fail.
 
 Only show the changes and don't commit or push.
 
+
+## Keeping secrets out of the add-on options
+
+Supervisor stores add-on options **in clear text** and hands them back in clear text
+to *any* API call — `ha apps info <slug> --raw-json` and the REST endpoint behind it.
+The `password:` schema type only masks the field in the UI; it protects nothing on the
+API side. A routine diagnostic is therefore enough to copy a credential into a log, a
+screenshot or a chat transcript. That is not hypothetical: it happened here on
+2026-08-16, and the GitHub PAT had to be revoked.
+
+Two options of this add-on hold a secret — `repository.password` and
+`repository.commit_message_api_key`, the latter billed per use. Both accept an
+indirection: store the **name of a key** instead of the secret.
+
+```yaml
+# /config/secrets.yaml — not served by the Supervisor API, and git-ignored
+github_pat_exporter: github_pat_11ABCDEF…
+anthropic_api_key: sk-ant-api03-…
+```
+
+```yaml
+# add-on options — this is all the API can ever hand back now
+repository:
+  password: "!secret github_pat_exporter"
+  commit_message_api_key: "!secret anthropic_api_key"
+```
+
+Any value starting with `!secret ` is read from `/config/secrets.yaml` when the
+add-on runs; anything else is used as-is, so **existing setups keep working untouched**
+and you can switch one option at a time.
+
+Things worth knowing:
+
+- **The resolved value is never logged**, not even on failure. Errors name the *key*,
+  which is what tells a typo apart from a revoked credential — both otherwise surface
+  as the same unreadable `401`.
+- **The two options fail differently, on purpose.** A broken indirection on
+  `repository.password` stops the run (no credential, no push). A broken one on
+  `commit_message_api_key` is logged and the export continues with the static commit
+  message, because that feature is opt-in and must never block a snapshot.
+- The file is only readable because the add-on already mounts `/config`. Nothing new
+  is exposed, and Supervisor never serves `secrets.yaml` over its API.
+- If you also run `git-deployer`, upgrade **it** before switching its own option — it
+  is the add-on that deploys, so it cannot repair itself.
 
 ## Known limitations
 

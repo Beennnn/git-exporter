@@ -7,10 +7,91 @@ export LD_PRELOAD="/usr/local/lib/libjemalloc.so.2"
 local_repository='/data/repository'
 pull_before_push="$(bashio::config 'repository.pull_before_push')"
 
+# Home Assistant's secrets file. Overridable through the environment for tests.
+SECRETS_FILE="${SECRETS_FILE:-/config/secrets.yaml}"
+
+# resolve_secret VALUE FIELD — resolve a `!secret <key>` indirection against
+# secrets.yaml, printing the resolved value on stdout.
+#
+# WHY. Supervisor stores add-on options in CLEAR TEXT and hands them back in clear
+# text to ANY API call — `ha apps info <slug> --raw-json` and the REST endpoint
+# behind it. The `password:` schema type only masks the field in the UI; it protects
+# nothing on the API side. A routine diagnostic is therefore enough to copy a
+# credential into a log or a chat transcript: that happened on 2026-08-16 and the
+# GitHub PAT had to be revoked. The defect is structural, so rotating alone only
+# buys time. This add-on holds two such secrets — the git password and the Anthropic
+# API key, the latter billed per use.
+#
+# The fix is to store the NAME of a /config/secrets.yaml key in the option instead of
+# the secret itself. Supervisor does not serve that file over its API and git ignores
+# it, so a diagnostic can only ever reveal the name, which is worthless alone.
+#
+# Backward compatible by construction: a value without the prefix is returned as-is,
+# so the switch can be made one option at a time, with no breaking window.
+#
+# The resolved value is NEVER logged, not even on failure — that would just move the
+# leak one step further. Failures name the key and the field only, which is precisely
+# what tells a typo apart from a revoked credential; both otherwise surface as the
+# same unreadable 401.
+#
+# Parsed in pure shell so this stays independent of the image's python: secrets.yaml
+# is a flat key → value mapping, and bare values, single/double-quoted values and
+# end-of-line comments are all handled.
+resolve_secret() {
+    local raw="${1-}" field="${2-option}" key='' line k v='' q rest found=0
+    case "$raw" in
+        '!secret '*) key="${raw#'!secret '}" ;;
+        *) printf '%s' "$raw"; return 0 ;;
+    esac
+
+    key="${key#"${key%%[![:space:]]*}"}"   # trim left
+    key="${key%"${key##*[![:space:]]}"}"   # trim right
+    [ -n "$key" ] || bashio::exit.nok \
+        "${field}: '!secret' without a key name — write '!secret <key>', <key> being an entry of ${SECRETS_FILE}."
+    [ -r "$SECRETS_FILE" ] || bashio::exit.nok \
+        "${field}: '!secret ${key}' requested, but ${SECRETS_FILE} is missing or unreadable."
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        # Blank line, comment, or indented key: secrets.yaml is a FLAT mapping, an
+        # indented key belongs to a nested structure this does not claim to handle.
+        case "$line" in ''|'#'*|[[:space:]]*) continue ;; esac
+        k="${line%%:*}"
+        [ "$k" != "$line" ] || continue    # no ':' → not a pair
+        case "$k" in '"'*'"'|"'"*"'") k="${k:1:${#k}-2}" ;; esac
+        [ "$k" = "$key" ] || continue
+
+        v="${line#*:}"
+        v="${v#"${v%%[![:space:]]*}"}"
+        q="${v:0:1}"
+        if [ "$q" = '"' ] || [ "$q" = "'" ]; then
+            # Quoted: everything up to the closing quote, which keeps a '#' that is
+            # part of the secret and drops a comment that would follow.
+            rest="${v:1}"
+            case "$rest" in *"$q"*) v="${rest%%"$q"*}" ;; *) v="$rest" ;; esac
+        else
+            # Bare: YAML requires a space before a comment '#', so a '#' glued to the
+            # text belongs to the value.
+            case "$v" in *' #'*) v="${v%% #*}" ;; esac
+            v="${v%"${v##*[![:space:]]}"}"
+        fi
+        found=1
+        break
+    done < "$SECRETS_FILE"
+
+    [ "$found" = 1 ] || bashio::exit.nok \
+        "${field}: key '${key}' not found in ${SECRETS_FILE} (exact name expected, without the '!secret ' prefix)."
+    [ -n "$v" ] || bashio::exit.nok \
+        "${field}: key '${key}' exists in ${SECRETS_FILE} but its value is empty."
+    printf '%s' "$v"
+}
+
 function setup_git {
     repository=$(bashio::config 'repository.url')
     username=$(bashio::config 'repository.username')
-    password=$(bashio::config 'repository.password')
+    # No credential means no push, so a broken indirection must fail the run loudly
+    # rather than let it walk into an authentication error nobody can read.
+    password=$(resolve_secret "$(bashio::config 'repository.password')" 'repository.password')
     commiter_mail=$(bashio::config 'repository.email')
     branch=$(bashio::config 'repository.branch_name')
     ssl_verify=$(bashio::config 'repository.ssl_verification')
@@ -505,7 +586,11 @@ else
     # Optionally replace the static message with an AI-generated one describing the
     # actual diff. Opt-in via repository.commit_message_api_key; any failure silently
     # keeps the static fallback above (see generate_ai_commit_message).
-    ai_api_key="$(bashio::config 'repository.commit_message_api_key')"
+    # The key may be a `!secret <key>` indirection into secrets.yaml. Unlike the git
+    # password, a broken indirection must NOT abort the export: this feature is opt-in
+    # and contractually degrades to the static message. resolve_secret has already
+    # logged what is wrong, so the misconfiguration is visible without being fatal.
+    ai_api_key="$(resolve_secret "$(bashio::config 'repository.commit_message_api_key')" 'repository.commit_message_api_key')" || ai_api_key=''
     if [ -n "$ai_api_key" ] && [ "$ai_api_key" != 'null' ] && ! git diff --cached --quiet; then
         bashio::log.info 'Generating AI commit message from staged diff'
         ai_commit_message="$(generate_ai_commit_message "$ai_api_key")"
