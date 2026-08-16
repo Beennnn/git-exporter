@@ -96,11 +96,12 @@ Removes the race between this exporter (HA → git) and a companion git-deployer
 branch head to a "last deployed SHA" published by the deployer (see
 `deployed_sha_entity`). If the remote is **ahead** of the deployed SHA — a merged
 change hasn't reached `/config` yet — the exporter **skips this cycle** instead of
-pushing the pre-deploy `/config` back and reverting it. Fail-safe: if the marker
-is unreadable, absent, or the remote head is unknown, the exporter does **not**
-skip (a live change is never silently dropped). Requires the deployer to publish
-the marker reliably on every deploy; keep it `false` until that is in place. See
-the consumer repo's `docs/design/deploy-snapshot-race.md`.
+pushing the pre-deploy `/config` back and reverting it. Fail-safe when the guard
+is off or the remote head is unknown: the exporter does **not** skip. For a
+durably unreadable marker the behaviour is a deliberate trade-off, configurable
+via `fail_closed_when_marker_unreadable`. Requires the deployer to publish the
+marker reliably on every deploy; keep it `false` until that is in place. See the
+consumer repo's `docs/design/deploy-snapshot-race.md`.
 
 ### `repository.deployed_sha_entity` (Optional)
 
@@ -115,8 +116,37 @@ empty state, then no entity at all, for a few tens of seconds. That eclipse
 happens precisely while a deploy is in flight, so a single failed read would drop
 the guard exactly when it is needed and let the capture revert the just-merged
 change. Retrying tells the two cases apart: an eclipse resolves within seconds, a
-real outage (deployer dead, entity deleted, API down) outlives the window and
-still fail-safes to snapshotting, preserving Workflow B.
+real outage (deployer dead, entity deleted, API down) outlives the window and is
+handled by `fail_closed_when_marker_unreadable`.
+
+### `repository.fail_closed_when_marker_unreadable` (Optional, default: false)
+
+What to do when the marker is **still** unreadable after every retry — a real
+outage, not the reload eclipse the retry already absorbs. The guard then cannot
+tell whether a deploy is pending, and both answers lose something:
+
+- `false` (default, historical) — snapshot anyway. Live capture is never frozen,
+  but if a deploy *was* pending the snapshot reverts it, silently.
+- `true` — abstain. No blind capture, so no silent revert; in exchange live
+  capture stalls until the marker returns.
+
+`true` is only safe because the abstention is **reported**: every cycle writes
+its outcome to `status_entity`, so a stalled capture raises `MARKER_UNREADABLE`
+instead of going unnoticed. Do not enable it without watching that entity — you
+would be trading a silent revert for a silent freeze, which is worse.
+
+### `repository.status_entity` (Optional)
+
+Home Assistant `input_text` the exporter writes the outcome of each cycle to,
+via the Supervisor's Core API. Default: `input_text.ha_exporter_last_result`.
+Values: `OK`, `DEPLOY_PENDING`, `MERGE_PENDING`, `MARKER_UNREADABLE`. Publishing
+is best-effort — a failure is logged and never aborts the export.
+
+This is a **positive** report, not a heartbeat: supervision reads a written
+result rather than inferring a failure from silence. Silence-based watchdogs on
+this same pipeline were disabled twice for false positives, and their absence
+then hid a real 7-day outage. `OK` is written last, after the push, so it means
+the cycle finished rather than started.
 
 ### `repository.merged_branch` (Optional, default: empty = disabled)
 

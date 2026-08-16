@@ -322,7 +322,48 @@ function merge_is_pending {
     [ "$diff_rc" -eq 1 ] || return 1
 
     bashio::log.info "Anti-course: fusion non déployée (${merged_branch} ${merged:0:8} en avance sur ${branch} ${head:0:8}) — snapshot sauté"
+    guard_status='MERGE_PENDING'
     return 0
+}
+
+# Issue du cycle, publiée dans une entité HA par publish_status (voir plus bas).
+# Renseignée par les gardes ; 'OK' si aucune n'a rien à signaler.
+guard_status='OK'
+
+# publish_status ÉTAT — publie l'issue du cycle dans repository.status_entity.
+#
+# Pourquoi un compte-rendu POSITIF plutôt qu'une surveillance du silence : deux
+# watchdogs successifs côté consommateur ont déduit la panne d'une ABSENCE de signal
+# (âge de `ha_deployed_sha.last_updated`, puis un heartbeat époch). Les deux ont produit
+# assez de faux positifs pour être désactivés — et leur désactivation a laissé passer
+# une panne réelle de 7 jours (deployer en CONFLICT, 2026-08-08 → 08-15, aucune alerte).
+# Un état écrit à chaque passe se lit sans inférence : pas de fenêtre à calibrer, pas de
+# faux positif quand il ne se passe simplement rien. Même raisonnement que le capteur
+# `sensor.deploiement_ha_dernier_resultat` côté HA.
+#
+# C'est ce compte-rendu qui rend le fail-closed tenable (cf. deploy_is_pending) : un
+# snapshot sauté cesse d'être silencieux, donc un gel de la capture est signalé au lieu
+# d'être découvert des jours plus tard.
+#
+# Best-effort : un échec de publication n'interrompt jamais l'export.
+function publish_status {
+    local entity payload
+    entity="$(bashio::config 'repository.status_entity')"
+    case "$entity" in
+        ''|null) entity='input_text.ha_exporter_last_result' ;;
+    esac
+
+    payload="$(jq -n --arg e "$entity" --arg v "$1" '{entity_id:$e, value:$v}')"
+    # shellcheck disable=SC2154  # SUPERVISOR_TOKEN is injected by the Supervisor at runtime
+    if curl -sSL -m 10 -X POST \
+        -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -d "$payload" \
+        "http://supervisor/core/api/services/input_text/set_value" >/dev/null 2>&1; then
+        bashio::log.info "Compte-rendu publié : ${1} (${entity})"
+    else
+        bashio::log.warning "Compte-rendu non publié dans ${entity} (entité absente ?) — export poursuivi"
+    fi
 }
 
 # Skip the snapshot when a deploy is pending — supprime la course exporter/deployer.
@@ -331,10 +372,10 @@ function merge_is_pending {
 # PR mergée n'a pas encore atteint /config : snapshoter maintenant re-pousserait le
 # /config d'avant-déploiement et annulerait le changement. On saute alors ce cycle ;
 # le deployer rattrape, et le cycle suivant snapshote normalement.
-# Opt-in via repository.skip_when_deploy_pending. FAIL-SAFE : au moindre doute (garde
-# OFF, HEAD distant inconnu, marqueur absent/illisible) on NE saute PAS — Workflow B
-# n'est jamais cassé silencieusement. Détail : docs/design/deploy-snapshot-race.md
-# (repo consommateur ha-vallesvilles-family).
+# Opt-in via repository.skip_when_deploy_pending. FAIL-SAFE quand la garde est OFF ou que
+# le HEAD distant est inconnu : on NE saute PAS. Pour le marqueur durablement illisible,
+# le comportement est configurable depuis 1.17.1-beennnn.8 — voir le bloc d'arbitrage plus
+# bas et docs/design/deploy-snapshot-race.md (repo consommateur ha-vallesvilles-family).
 function deploy_is_pending {
     local enabled entity head deployed
     enabled="$(bashio::config 'repository.skip_when_deploy_pending')"
@@ -386,14 +427,35 @@ function deploy_is_pending {
         fi
     done
 
+    # Panne DURABLE du marqueur : l'éclipse a survécu à tous les réessais. Ce n'est plus
+    # un rechargement de helpers, c'est un vrai trou (deployer mort, entité supprimée ou
+    # renommée, Core injoignable). On ne sait donc pas si un déploiement est en attente.
+    #
+    # Arbitrage tranché le 2026-08-16 (voir docs/design/deploy-snapshot-race.md § Constraints) :
+    # le comportement dépend de repository.fail_closed_when_marker_unreadable.
+    #   false (défaut, historique) — on capture quand même. Workflow B n'est jamais gelé,
+    #     mais si un déploiement était en attente, la capture le reverte en silence.
+    #   true  — on s'abstient. Plus aucun revert silencieux possible ; en contrepartie la
+    #     capture live s'arrête tant que le marqueur ne revient pas. Ce qui rend ce choix
+    #     tenable, c'est que l'abstention n'est PAS silencieuse : guard_status remonte
+    #     MARKER_UNREADABLE, publié par publish_status et surveillé côté HA. On échange un
+    #     revert silencieux contre un gel ANNONCÉ — pas contre un gel silencieux.
+    # Le compte-rendu est émis dans les DEUX cas : même en fail-safe, un marqueur durablement
+    # illisible est une anomalie qui mérite d'être vue.
     case "$deployed" in
         ''|null|unknown|unavailable)
+            guard_status='MARKER_UNREADABLE'
+            if [ "$(bashio::config 'repository.fail_closed_when_marker_unreadable')" == 'true' ]; then
+                bashio::log.warning "Anti-course: ${entity} illisible après ${attempts} essais — snapshot SAUTÉ (fail-closed)"
+                return 0
+            fi
             bashio::log.warning "Anti-course: ${entity} illisible après ${attempts} essais — snapshot autorisé (fail-safe)"
             return 1 ;;
     esac
 
     if [ "$head" != "$deployed" ]; then
         bashio::log.info "Anti-course: déploiement en attente (${deployed:0:8} → ${head:0:8}) — snapshot sauté"
+        guard_status='DEPLOY_PENDING'
         return 0
     fi
     return 1
@@ -404,7 +466,8 @@ bashio::log.info 'Start git export'
 setup_git
 
 if merge_is_pending || deploy_is_pending; then
-    bashio::log.info 'Exporter finished (snapshot sauté: changement fusionné non appliqué à /config)'
+    publish_status "$guard_status"
+    bashio::log.info "Exporter finished (snapshot sauté: ${guard_status})"
     exit 0
 fi
 
@@ -462,5 +525,11 @@ else
         git push origin HEAD:"$branch"
     fi
 fi
+
+# Publié en TOUT DERNIER, une fois le push passé : « OK » doit vouloir dire que le cycle
+# est allé au bout, pas qu'il a démarré. Le cas guard_status=MARKER_UNREADABLE arrive
+# jusqu'ici quand le fail-safe a laissé passer la capture — l'anomalie remonte alors même
+# si le snapshot a réussi, car c'est la seule trace d'une capture faite à l'aveugle.
+publish_status "$guard_status"
 
 bashio::log.info 'Exporter finished'
